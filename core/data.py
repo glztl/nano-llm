@@ -3,7 +3,7 @@ import requests
 import os
 
 # 从 config 导入配置 (统一配置管理)
-from config import block_size, batch_size, train_split, device
+from config.config import block_size, batch_size, train_split, device
 
 """
     1. 超参数配置

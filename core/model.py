@@ -17,8 +17,7 @@ from torch.nn import functional as F
 
 
 # 从config模块导入全局配置
-from config import block_size, n_embd, n_head, n_layer, dropout, device
-
+from config.config import block_size, n_embd, n_head, n_layer, dropout, device
 
 
 ### 单头自注意力机制 (Head)
@@ -367,7 +366,7 @@ class GPT(nn.Module):
             Q: 增加n_layer和增加n_embd哪个更有效?
             A: 取决于任务。深层网络提取更抽象特征，宽层网络捕获更多信息。通常两者平衡(Scaling Law)
         """
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head) for _ in range(n_layer)])
+        self.blocks = nn.Sequential(*[Block(n_embd=n_embd, n_head=n_head) for _ in range(n_layer)])
         """
         输入: [B, T, n_embd] -> 输出: [B, T, n_embd]  形状不变
         参数量: 2 * n_embd = 256 (约 0.25K 参数)
@@ -430,50 +429,306 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """
+        Args:
+            idx: [B, T] 输入 token IDs (Batch, Time)
+            targets: [B, T] 目标 token IDs (可选, 用于计算loss)
+        Returns:
+            logits: [B, T, V] 或 [B*T, V] 预测分数 (V = vocab_size)
+            loss: 标量或 None
+        """
+        
+        """
+        获取输入维度
+            B = Batch Size (批次大小, 如64)
+            T = Time Steps (序列长度, 如256)
+
+            Q: 为什么需要记录 B 和 T?
+            A: 后续reshape和位置编码需要用到
+        """
         B, T = idx.shape
-        tok_emb = self.token_embedding_table(idx)  # [B, T, n_embd]
-        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))  # [T, n_embd]
+
+        """
+        输入: idx [B, T]
+        输出: tok_emb [B, T, n_embd]
+
+        物理意义: 将每个token ID 映射为稠密向量
+        例如: ID=5 的字符 'a' -> [0.1, -0.3, 0.8, ...] (n_embd维向量)
+            Q: embedding层有多少参数
+            A: vocab_size * n_embd = 65 * 128 = 8320 (约 8K 参数)
+        """
+        tok_emb = self.token_embedding_table(idx)
+
+        """
+        位置编码 Positional Embedding
+        输入: [0, 1, 2, ..., T-1] 位置索引
+        输出: pos_emb [T, n_embd]
+
+        物理意义: 注入位置信息
+        为什么需要位置编码? 没有RNN的时序性, 需要显示告诉模型"第1个词, 第2个词, ..."
+
+            Q: 为什么这里不用 RoPE?
+            A: RoPE更先进, 但实现复杂 
+        """
+        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
+        
+        """
+        Embedding 相加
+        输入: tok_emb [B, T, n_embd] + pos_emb [T, n_embd] -> 输出: x [B, T, n_embd]
+
+        广播机制: pos_emb 会自动复制到每个batch
+        物理意义: 每个token的向量 = 语义信息 + 位置信息
+        """
         x = tok_emb + pos_emb  # [B, T, n_embd]
+
+        """
+        输入: x [B, T, n_embd]
+        输出: x [B, T, n_embd]
+
+        物理意义: 核心计算层
+        每个block包含:
+            1. Multi-Head self-Attention: 捕捉词与词的关系
+            2. Feed-Forward Network: 非线性变换
+            3. LayerNorm + Residual: 稳定训练
+
+            Q: 为什么输入输出维度相同?
+            A: 残差连接要求维度一致, 便于信息流动和梯度传播
+        """
         x = self.blocks(x)
+
+        """
+        输入: x [B, T, n_embd]
+        输出: x [B, T, n_embd]
+
+        物理意义: 归一化, 使分布稳定，便于后续线性层预测
+        Q: 为什么最后还要 LayerNorm?
+        A: Pre-LN 架构的标准做法，让输出分布更稳定
+        """
         x = self.ln_f(x)
+
+        """
+        输入: x [B, T, n_embd]
+        输出: logits [B, T, vocab_size]
+
+        物理意义: 将n_embd维向量映射回词表空间，预测下一个token的分数
+        每个分数代表"下一个token是该词的概率" (未归一化)
+
+            Q: logits 和 probabilities 的区别?
+            A: logits 是原始分数, probabilities 是 softmax 后的概率
+        """
         logits = self.lm_head(x)
 
+        """
+        计算Loss
+        """
         if targets is None:
+            # 推理模式，只需要Logits，不计算Loss
             loss = None
+            
         else:
+            # 训练模式
+
+            """
+            展平logits
+            输入: [B, T, V]
+            输出: [B*T, V]
+            为什么? cross_entropy要求输入是二维的 (N, C), 其中N是样本数, C是类别数
+            """
             logits = logits.view(B * T, -1)
+
+            """
+            展平targets
+            输入: [B, T]
+            输出: [B*T]
+            为什么? 每个位置都有一个目标token
+            """
             targets = targets.view(B * T)
+
+            """
+            计算交叉熵损失
+            输入: logits [B*T, V], targets [B*T]
+            输出: loss 标量
+
+            物理意义: 衡量预测分布与真实分布的差异
+                    值越小，模型预测越准确
+                Q: 为什么用CrossEntropy 而不是 MSE?
+                A: 分类任务标准损失，对概率分布更敏感
+            """
             loss = F.cross_entropy(logits, targets)
         
         return logits, loss
     
     def generate(self, idx: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
+        """
+        自回归生成: 根据输入序列，逐个预测新 token
+
+        Args:
+            idx: [B, T] 初始输入序列 (如 "Hello" 的 token IDs)
+            max_new_tokens: 需要生成的新 token 数量
+        Returns:
+            idx: [B, T + max_new_tokens] 完整生成序列
+        """
+        # 逐个生成新token
         for _ in range(max_new_tokens):
+
+            """
+            截取上下文 (避免位置编码越界)
+            输入: idx [B, T_current] (T_current 随生成增长)
+            输出: idx_cond [B, min(T_current, block_size)]
+
+            为什么需要?
+                1. 位置编码只定义了 block_size 个位置
+                2. 超出范围会报错
+                3. 模型只需要看最近的上下文即可
+
+                Q: 如果序列超过block_size怎么办?
+                A: 滑动窗口, 只保留最近 block_size 个 token
+            """
             idx_cond = idx[:, -block_size:]
+
+            """
+            前向传播 获取预测分数
+
+            输入: idx_cond [B, T_cond]
+            输出: logits [B, T_cond, vocab_size]
+
+            为什么 targets=None?
+            推理时没有标准答案, 不需要计算 loss
+                
+                Q: 推理和训练的forward有什么区别?
+                A: 推理不需要计算Loss, 节省计算资源
+            """
             logits, _ = self(idx_cond, None) 
+
+            """
+            只取最后一个时间步的预测
+
+            输入: logits [B, T_cond, V]
+            输出: logits [B, V]
+
+            为什么只取最后一个?
+            我们只关心"下一个token" 是什么, 不需要前面位置的预测
+            例如：输入 “Hello”， 只预测第5个位置的下一个词
+
+                Q: 为什么不使用所有位置的 logits?
+                A: 自回归生成是逐个 token 进行的，只需预测下一步
+            """
             logits = logits[:, -1, :]
+            
+            """
+            转换为概率分布
+            输入: logits [B, V]
+            输出: probs [B, V]
+
+            物理意义:
+                logits 是原始分数，softmax后变成概率分布
+                所有词的概率之和 = 1
+                例如：[0.01, 0.02, 0.85, 0.01, ...] 表示第三个词的概率最高
+
+                Q: logits和probs的区别?
+                A: logits 是未归一化的分数, probs是归一化的概率
+            """
             probs = F.softmax(logits, dim=-1)
+
+            """
+            采样下一个token
+            输入: probs [B, V]
+            输出: idx_next [B, 1]
+
+            物理意义:
+                根据概率分布随机采样一个token
+                高概率的词更可能被选中，但低概率词也有机会
+
+                Q: 为什么不用argmax而用multinomial?
+                A: argmax 总是选概率最高的，输出单一重复，采样增加多样性，让生成更自然
+            """
             idx_next = torch.multinomial(probs, num_samples=1)
+
+            """
+            拼接到序列末尾
+            输入: idx [B, T_current], idx_next [B, 1]
+            输出: idx [B, T_current + 1]
+
+            物理意义:
+                将生成的 token 添加到序列末尾
+                下一次循环时，模型可以看到整个新生成的token
+
+                Q: 为什么dim=1?
+                A: dim=0时batch维度, dim=1时时间维度，我们要在时间维度上拼接新token
+            """
             idx = torch.cat((idx, idx_next), dim=1)
 
+        """
+        返回完整序列
+            输出: idx [B, T_initial + max_new_tokens]
+
+        生成过程:
+            初始输入: "Hello" -> idx = [H, e, l, l, o] [B=1, T=5]
+        -> 
+            第一次循环:
+                idx_cond = [H, e, l, l, o]
+                logits = 模型预测下一个词的概率分布
+                probs = softmax(logits)
+                idx_next = 采样得到的下一个词 (如 " " 空格)
+                idx = [H, e, l, l, o, " "] [B=1, T=6]
+        ->
+            第二次循环:
+                idx_cond = [e, l, l, o, " "] (只保留最近的 block_size 个 token)
+                logits = 模型预测下一个词的概率分布
+                probs = softmax(logits)
+                idx_next = 采样得到的下一个词 (如 "W")
+                idx = [H, e, l, l, o, " ", "W"] [B=1, T=7]
+
+            ...
+                最终输出: [H, e, l, l, o, " ", "W", "o", "r", "l", "d"] [B=1, T=T+max_new_tokens]
+        """
         return idx
     
 
 ### 测试
 if __name__ == "__main__":
-    from data import SimpleTokenizer, prepare_data
+    """
+        Q: 为什么用 if __name__ == "__main__": ?
+        A:
+            1. 防止被其它模块 import 时自动执行测试代码
+            2. 区分 作为库使用 和 作为脚本运行
+            3. Python的惯用写法，确保测试代码只在直接运行时执行
+    """
+    from core.data import SimpleTokenizer, prepare_data
 
     # 从 config 导入 vocab_size 需要先初始化 tokenizer
+    """
+        # 为什么需要先初始化 tokenizer？
+        # 因为 vocab_size 取决于数据中的唯一字符数
+        # 字符级分词：65 (莎士比亚数据集)
+        # BPE 分词：50257 (GPT-2) 等
+
+        Q: vocab_size 对模型有什么影响
+        A: 决定 Embedding层大小，影响参数量和表达能力
+    """
     text = prepare_data()
     tokenizer = SimpleTokenizer(text)
     vocab_size = tokenizer.vocab_size
 
     print(f"Building model with vocab_size={vocab_size}...")
 
+    """
+    初始化模型
+
+    为什么调用 model.to(device)??
+    确保模型参数和数据在同一设备 (CPU/GPU)
+
+        Q: 模型初始化后的参数是随机的吗?
+        A: 是的，模型参数通过 _init_weights 方法随机初始化，通常使用正态分布 N(0, 0.02)。这有助于训练的稳定性和收敛速度。
+    """
     model = GPT(vocab_size)
     model.to(device)
 
     # 前向传播测试 (targets=None 可以看到原始 logits 形状)
+    """
+    为什么logits是[B, T, vocab_size]而不是[B*T, vocab_size]? 3D的
+    [B, T, vocab_size] 是模型的原始输出形状，表示每个位置对每个词的预测分数
+    """
     test_input = torch.randint(0, vocab_size, (2, 10), device=device)
     logits, loss = model(test_input, targets=None)
 
@@ -481,6 +736,13 @@ if __name__ == "__main__":
     print(f"Logits shape: {logits.shape}")  # 这里会显示 [2, 10, 65]
 
     # 再测试带 loss 的情况
+    """
+    targets = test_input  -> 计算loss
+
+    为什么targets也是 test_input?
+    测试时随便用一个形状的Tensor即可
+    真实训练时 targets 是输入右移一位的结果
+    """
     logits_with_loss, loss = model(test_input, test_input)
 
     print(f"Input shape: {test_input.shape}")
@@ -488,12 +750,34 @@ if __name__ == "__main__":
     print(f"Loss: {loss.item():.4f}")
 
     # 生成测试
+    """
+    切换到评估模式
+
+        Q: model.eval() 和 model.train() 有什么区别?
+        A: Dropout 行为不同: train 时随机丢弃, eval时不丢弃
+           LayerNorm 行为不同: train 时用 batch 统计, eval时用全局统计
+           推理时必须用 eval(), 否则结果不稳定
+    """
     model.eval()
+    """
+    起始序列: "Hello" -> [46, 43, 50, 50, 53] (根据 tokenizer 的 string_to_int 映射)
+    形状：[B=1, T=5]
+
+        Q: 为什么是二维张量[1, 5]而不是一维[5]?
+        A: 模型输入要求是 [B, T] 形状，即使只有一个序列也需要保持批次维度
+    """
     start = torch.tensor([[tokenizer.string_to_int['H'],
                            tokenizer.string_to_int['e'],
                            tokenizer.string_to_int['l'],
                            tokenizer.string_to_int['l'],
                            tokenizer.string_to_int['o']]], device=device)
+    """
+    生成20个新token
+    输出形状: [B=1, T=5+20=25]
+
+        Q: generate 能批量生成吗?
+        A: 可以，B>1时每个样本独立生成
+    """
     generated = model.generate(start, max_new_tokens=20)
     print(f"Generated: {tokenizer.decode(generated[0].tolist())}")
 
