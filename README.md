@@ -1,4 +1,4 @@
-# Nano LLM
+# Tiny LLM
 
 从零手写实现一个迷你大语言模型，用于学习 Transformer 架构与 PyTorch 底层原理。
 
@@ -22,4 +22,4 @@
 ## 使用方法
 
 ```bash
-uv run python data.py
+uv run data.py

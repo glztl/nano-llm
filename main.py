@@ -1,5 +1,5 @@
 def main():
-    print("Hello from nano-llm!")
+    print("Hello from tiny-llm!")
 
 
 if __name__ == "__main__":
