@@ -1,0 +1,40 @@
+{
+  // ==========================================
+  // Tiny LLM 项目特定设置
+  // ==========================================
+
+  // Python 解释器
+  "python.defaultInterpreterPath": ".venv/bin/python",
+
+  // 格式化
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "ms-python.python",
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+
+  // Python 特定
+  "python.linting.enabled": true,
+  "python.linting.pylintEnabled": true,
+  "python.formatting.provider": "black",
+
+  // 文件编码
+  "files.encoding": "utf8",
+  "files.eol": "\n",
+
+  // 排除文件
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "**/.venv": true,
+    "**/uv.lock": true
+  },
+
+  // 编辑器行为
+  "editor.rulers": [80, 120],
+  "editor.wordWrap": "on",
+  "editor.minimap.enabled": true,
+
+  // 终端设置
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
+  "terminal.integrated.fontSize": 14
+}
