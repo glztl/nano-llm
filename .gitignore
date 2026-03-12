@@ -6,7 +6,6 @@ __pycache__/
 *$py.class
 .venv/
 .env
-uv.lock
 
 # IDE
 .idea/
